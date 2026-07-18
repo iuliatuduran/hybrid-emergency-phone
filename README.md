@@ -42,7 +42,7 @@ This project transforms a vintage telephone terminal into a smart, hybrid emerge
 * **HTTPS & JSON** for secure data formatting and transmission to Google Cloud services.
 * **MQTT** (via Telegram Bot API) for fast, real-time alert dispatching.
 
-## ⚙️ Getting Started (Local Setup)
+## Getting Started (Local Setup)
 
 ### Prerequisites
 To compile and upload the firmware to the LilyGO T-Call board, you will need:
