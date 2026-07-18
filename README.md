@@ -41,3 +41,25 @@ This project transforms a vintage telephone terminal into a smart, hybrid emerge
 * **AT Commands** for asynchronous serial communication with the cellular modem.
 * **HTTPS & JSON** for secure data formatting and transmission to Google Cloud services.
 * **MQTT** (via Telegram Bot API) for fast, real-time alert dispatching.
+
+## ⚙️ Getting Started (Local Setup)
+
+### Prerequisites
+To compile and upload the firmware to the LilyGO T-Call board, you will need:
+* **Arduino IDE** (v2.x recommended)
+* **ESP32 Board Package** installed via Boards Manager (Select `ESP32 Dev Module`).
+* **Required Arduino Libraries:**
+  * `ArduinoJson` (for parsing Google Geolocation responses)
+  * `UniversalTelegramBot` (for secure Telegram messaging)
+  * `Adafruit_GFX` & `Adafruit_ST7789` (for TFT display rendering)
+
+### Configuration
+Before uploading the code, open the main sketch and insert your specific credentials and API keys in the defined variables:
+
+```cpp
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+#define BOTtoken "YOUR_TELEGRAM_BOT_TOKEN"
+#define CHAT_ID "YOUR_TELEGRAM_CHAT_ID"
+#define GOOGLE_API_KEY "YOUR_GOOGLE_API_KEY"
+const String numarUrgenta = "+407XXXXXXX"; // Predefined emergency contact
