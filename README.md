@@ -16,7 +16,7 @@ This project transforms a vintage telephone terminal into a smart, hybrid emerge
 * **Visual & Acoustic Feedback:** Employs an active piezoelectric buzzer to signal key moments in real-time (distinct alerts upon emergency triggering, simulating standard dialing and ringing tones during the call, and a final confirmation beep when the process concludes). A TFT display simultaneously shows the system's live status.
 
 <p align="center">
-  <img src="images/Picture2.png" alt="Vintage Telephone Hardware Restoration" width="600">
+  <img src="images/Picture2.jpg" alt="Vintage Telephone Hardware Restoration" width="600">
 </p>
 
 <p align="center">
