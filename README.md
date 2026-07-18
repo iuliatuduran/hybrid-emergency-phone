@@ -19,6 +19,11 @@ This project transforms a vintage telephone terminal into a smart, hybrid emerge
   <img src="images/Picture2.png" alt="Vintage Telephone Hardware Restoration" width="600">
 </p>
 
+<p align="center">
+  <img src="images/Picture3.png" alt="Vintage Telephone Hardware Restoration" width="600">
+</p>
+
+
 
 ## Hardware Stack
 * **Core Microcontroller & Modem:** LilyGO T-Call development board integrating the ESP32-WROVER-B and SIM800L GSM module.
