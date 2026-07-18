@@ -63,3 +63,10 @@ const char* password = "YOUR_WIFI_PASSWORD";
 #define CHAT_ID "YOUR_TELEGRAM_CHAT_ID"
 #define GOOGLE_API_KEY "YOUR_GOOGLE_API_KEY"
 const String numarUrgenta = "+407XXXXXXX"; // Predefined emergency contact
+
+### Usage
+
+* **1.Power the system using the USB-C cable or the integrated Li-Po battery.**
+* **2.Wait for the TFT display to indicate successful initialization (WiFi and GSM connection established).**
+* **3.Trigger the alert by either lifting the vintage telephone handset or speaking the keyword "AJUTOR" near the microphone.**
+* **4.The system will emit acoustic signals, fetch the GSM location, send the Telegram alert, and initiate the emergency call.**
