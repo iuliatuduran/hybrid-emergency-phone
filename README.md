@@ -3,6 +3,10 @@
 ## Overview
 This project transforms a vintage telephone terminal into a smart, hybrid emergency alerting system dedicated to elderly individuals. By eliminating modern technological barriers, the system provides a completely familiar interface (lifting the handset) while running advanced IoT capabilities and geolocation protocols in the background. 
 
+<p align="center">
+  <img src="images/image.png" alt="Vintage Telephone Hardware Restoration" width="600">
+</p>
+
 ## Key Features
 * **Hybrid Triggering Mechanism:** The emergency alert can be activated mechanically by lifting the phone receiver or vocally via keyword recognition ("AJUTOR").
 * **GSM Geolocation (Cell-ID):** Estimates the user's location using 2G GSM network parameters (MCC, MNC, LAC, CID) to ensure functionality even indoors.
