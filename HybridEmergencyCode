@@ -1,0 +1,902 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <UniversalTelegramBot.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <Wire.h>
+
+#define MODEM_POWER_ON 23
+#define MODEM_PWKEY    4
+#define MODEM_TX       27
+#define MODEM_RX       26
+#define PIN_BUTON      14
+#define PIN_BUZZER     32
+#define TFT_CS   15
+#define TFT_RST  12
+#define TFT_DC    2
+#define TFT_MOSI 13
+#define TFT_SCLK 18
+#define PIN_VOCAL_DEDICAT 25 // Semnal de la Raspberry Pi
+
+
+//wifi settings
+const char* ssid     = "";
+ const char* password = "";
+
+//telegram
+#define BOTtoken       ""
+#define CHAT_ID        ""
+//google api
+#define GOOGLE_API_KEY ""
+
+String sursaAlerta = "Necunoscută"; 
+
+String infoRetea = "GSM: necunoscut";
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
+WiFiClientSecure clientSecure;
+UniversalTelegramBot bot(BOTtoken, clientSecure);
+HardwareSerial serialGSM(1);
+
+//phone number
+const String numarUrgenta = "";
+int counterApasari = 0;
+unsigned long timpUltimaApasare = 0;
+const unsigned long fereastraTimp = 3000;
+
+unsigned long timpUltimaVocal   = 0;
+
+// ora exactă
+void initNTP() {
+  //setarea fusului orar al României
+  configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.nist.gov");
+  Serial.println("Oră și dată inițializată");
+}
+
+String getTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return "??/??/???? ??:??";
+  char buf[20];
+  strftime(buf, sizeof(buf), "%d/%m/%Y %H:%M", &timeinfo);
+  return String(buf);
+}
+
+
+void afisare(String titlu, String msg, uint16_t culoare) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(10, 80);
+  tft.setTextColor(culoare);
+  tft.setTextSize(3);
+  tft.println(titlu);
+  tft.setCursor(10, 160);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.println(msg);
+}
+
+//buzzer declanșare
+void buzzerUrgenta() {
+  for (int i = 0; i < 6; i++) {
+    digitalWrite(PIN_BUZZER, HIGH);
+    delay(300);
+    digitalWrite(PIN_BUZZER, LOW);
+    delay(150);
+  }
+}
+
+//buzzer finalizare proces
+void buzzerConfirmare() {
+  digitalWrite(PIN_BUZZER, HIGH); delay(100);
+  digitalWrite(PIN_BUZZER, LOW);  delay(100);
+  digitalWrite(PIN_BUZZER, HIGH); delay(100);
+  digitalWrite(PIN_BUZZER, LOW);
+}
+
+
+
+String trimiteAT(String comanda, int timeout_ms = 3000) {
+  while (serialGSM.available()) serialGSM.read();
+  serialGSM.println(comanda);
+  String resp = "";
+  unsigned long t = millis();
+  while (!serialGSM.available() && millis() < t + 2000);
+  unsigned long lastChar = millis();
+  while (millis() < t + timeout_ms) {
+    if (serialGSM.available()) {
+      resp += (char)serialGSM.read();
+      lastChar = millis();
+    }
+    if (resp.length() > 0 && millis() - lastChar > 500) break;
+  }
+  Serial.println(">>> " + comanda);
+  Serial.println("<<< " + resp);
+  Serial.println("---");
+  return resp;
+}
+
+
+bool asteaptaRetea(int secMax = 30) {
+  for (int i = 0; i < secMax; i++) {
+    String r = trimiteAT("AT+CREG?", 2000);
+    if (r.indexOf(",1") != -1 || r.indexOf(",5") != -1) {
+      Serial.println("Retea OK!");
+      return true;
+    }
+    afisare("RETEA", "Astept " + String(i+1) + "/" + String(secMax), ST77XX_YELLOW);
+    delay(1000);
+  }
+  return false;
+}
+
+
+String hexToDec(String h) {
+  h.trim();
+  if (h.length() == 0) return "0";
+  return String(strtoul(h.c_str(), NULL, 16));
+}
+
+
+bool citesteGSM(String &mcc, String &mnc, String &lac, String &cid, String &semnal) {
+
+  //PASUL 1: Așteapta rețea
+  afisare("GSM", "Astept retea...", ST77XX_CYAN);
+  if (!asteaptaRetea(30)) {
+    Serial.println("Retea indisponibila!");
+    return false;
+  }
+  delay(2000); 
+  //--- Detectare operator (rulează mereu) ---
+  String cops = trimiteAT("AT+COPS?", 3000);
+  Serial.println("COPS: " + cops);
+  String numeOperator = "Necunoscut";
+  String tehnologie = "";
+  int qi1 = cops.indexOf('"');
+  int qi2 = cops.indexOf('"', qi1 + 1);
+  if (qi1 != -1 && qi2 != -1) numeOperator = cops.substring(qi1 + 1, qi2);
+ String numeOperatorUpper = numeOperator;
+numeOperatorUpper.toUpperCase();
+if (numeOperatorUpper.indexOf("CONNEX") != -1 || numeOperatorUpper.indexOf("VODAFONE") != -1) {
+  numeOperator = "Vodafone";
+}
+  int lastComma = cops.lastIndexOf(',');
+  if (lastComma != -1) {
+    int act = cops.substring(lastComma + 1).toInt();
+    switch (act) {
+      case 0: case 1: case 3: tehnologie = "2G"; break;
+      case 2: case 4: case 5: case 6: tehnologie = "3G"; break;
+      case 7: tehnologie = "4G"; break;
+      default: tehnologie = ""; break;
+    }
+  }
+  infoRetea = "GSM: " + numeOperator + (tehnologie != "" ? " " + tehnologie : "");
+  Serial.println("Operator detectat: " + infoRetea);
+  if (numeOperator.indexOf("Digi") != -1 || numeOperator.indexOf("RCS") != -1) { mcc="226"; mnc="5"; }
+  else if (numeOperator.indexOf("Vodafone") != -1) { mcc="226"; mnc="1"; }
+  else if (numeOperator.indexOf("Orange") != -1)   { mcc="226"; mnc="10"; }
+  else if (numeOperator.indexOf("Telekom") != -1)  { mcc="226"; mnc="3"; }
+  else { mcc="226"; mnc="5"; }
+  //PASUL 2: Încearcă AT+CCED 
+  afisare("GSM", "Citesc turn...", ST77XX_CYAN);
+  String resp = trimiteAT("AT+CCED=0,1", 3000);
+  Serial.println("CCED RAW: [" + resp + "]");
+  //Format CCED: +CCED: MCC,MNC,LAC,CID,BSIC,ARC,TA,DBM,...)
+  if (resp.indexOf("+CCED:") != -1) {
+    int idx = resp.indexOf("+CCED:") + 6;
+    String date = resp.substring(idx);
+    date.trim();
+    Serial.println("CCED date: [" + date + "]");
+    String c[10];
+    int ci = 0, start = 0;
+    for (int i = 0; i <= (int)date.length() && ci < 10; i++) {
+      if (i == (int)date.length() || date[i] == ',') {
+        c[ci++] = date.substring(start, i);
+        start = i + 1;
+      }
+    }
+    if (ci >= 4) {
+      mcc    = c[0]; mcc.trim();
+      mnc    = c[1]; mnc.trim();
+      lac    = hexToDec(c[2]);
+      cid    = hexToDec(c[3]);
+      semnal = (ci >= 8) ? c[7] : "?";
+      semnal.trim();
+
+      Serial.println("CCED -> MCC=" + mcc + " MNC=" + mnc + 
+                     " LAC=" + lac + " CID=" + cid);
+
+      //Verifica dacă sunt date reale, nu zerouri
+      if (lac != "0" && cid != "0" && mcc.length() >= 3) {
+        return true;
+      }
+      Serial.println("CCED a returnat zerouri, incerc CENG...");
+    }  
+  }
+  //PASUL 3: AT+CENG
+  Serial.println("Incerc AT+CENG...");
+  trimiteAT("AT+CENG=1,1", 1000);
+  delay(1000); // Asteapta sa se populeze
+  resp = trimiteAT("AT+CENG?", 3000);
+  Serial.println("CENG RAW: [" + resp + "]");
+  //Format: +CENG: 0,"arfcn,rxl,rxq,mcc,mnc,bsic,cellid,rla,txp,lac,TA"
+  int searchFrom = 0;
+  while (true) {
+    int p1 = resp.indexOf('"', searchFrom);
+    if (p1 == -1) break;
+    int p2 = resp.indexOf('"', p1 + 1);
+    if (p2 == -1) break;
+
+    String date = resp.substring(p1 + 1, p2);
+    searchFrom = p2 + 1;
+
+    String c[11];
+    int ci = 0, start = 0;
+    for (int i = 0; i <= (int)date.length() && ci < 11; i++) {
+      if (i == (int)date.length() || date[i] == ',') {
+        c[ci++] = date.substring(start, i);
+        start = i + 1;
+      }
+    }
+
+    if (ci < 10) continue;
+
+    String tmpMCC = c[3]; tmpMCC.trim();
+    String tmpMNC = c[4]; tmpMNC.trim();
+    String tmpCID = hexToDec(c[6]);
+    String tmpLAC = hexToDec(c[9]);
+
+    Serial.println("CENG linie: MCC=" + tmpMCC + " MNC=" + tmpMNC + 
+                   " LAC=" + tmpLAC + " CID=" + tmpCID);
+
+    //Accepta doar daca nu sunt zerouri
+    if (tmpLAC != "0" && tmpCID != "0" && 
+        tmpMCC.length() >= 3 && tmpMCC != "000") {
+      mcc    = tmpMCC;
+      mnc    = tmpMNC;
+      lac    = tmpLAC;
+      cid    = tmpCID;
+      semnal = c[1]; semnal.trim();
+      Serial.println("CENG OK: MCC=" + mcc + " MNC=" + mnc + 
+                     " LAC=" + lac + " CID=" + cid);
+      return true;
+    }
+  }
+
+  //PASUL 4: Ultima sansa - AT+CSQ pentru semnal + AT+CREG pentru info
+  Serial.println("CENG tot zerouri! Incerc CREG extins...");
+  resp = trimiteAT("AT+CREG=2", 1000); 
+  delay(500);
+  resp = trimiteAT("AT+CREG?", 3000);
+  Serial.println("CREG ext: [" + resp + "]");
+
+  // Format extins: +CREG: 2,1,"LAC_HEX","CID_HEX"
+  if (resp.indexOf("+CREG:") != -1) {
+    int idx = resp.indexOf("+CREG:") + 6;
+    String part = resp.substring(idx);
+    part.trim();
+
+    // Caută ghilimelele pentru LAC si CID
+    int q1 = part.indexOf('"');
+    int q2 = part.indexOf('"', q1 + 1);
+    int q3 = part.indexOf('"', q2 + 1);
+    int q4 = part.indexOf('"', q3 + 1);
+
+    if (q1 != -1 && q2 != -1 && q3 != -1 && q4 != -1) {
+      String lacHex = part.substring(q1 + 1, q2);
+      String cidHex = part.substring(q3 + 1, q4);
+      lac = hexToDec(lacHex);
+      cid = hexToDec(cidHex);
+
+      Serial.println("CREG -> LAC=" + lac + " CID=" + cid);
+
+
+      String cops = trimiteAT("AT+COPS?", 3000);
+      Serial.println("COPS: " + cops);
+      String csq = trimiteAT("AT+CSQ", 2000);
+      semnal = "?";
+      if (csq.indexOf("+CSQ:") != -1) {
+        int si = csq.indexOf("+CSQ:") + 5;
+        semnal = csq.substring(si, csq.indexOf(",", si));
+        semnal.trim();
+      }
+
+      if (lac != "0" && cid != "0") {
+        Serial.println("CREG OK: MCC=" + mcc + " MNC=" + mnc + 
+                       " LAC=" + lac + " CID=" + cid);
+        return true;
+      }
+    }
+  }
+
+  Serial.println("Toate metodele au esuat!");
+  return false;
+}
+
+
+bool geolocalizeaza(String mcc, String mnc, String lac, String cid,
+                    String &latOut, String &lonOut, String &precOut) {
+
+  if (WiFi.status() != WL_CONNECTED) return false;
+  afisare("LOCATIE", "Google API...", ST77XX_MAGENTA);
+
+  int mccI = mcc.toInt();
+  int mncI = mnc.toInt();
+  int lacI = lac.toInt();
+  int cidI = cid.toInt();
+
+  String json = "{";
+  json += "\"homeMobileCountryCode\":" + String(mccI) + ",";
+  json += "\"homeMobileNetworkCode\":" + String(mncI) + ",";
+  json += "\"radioType\":\"gsm\",";
+  json += "\"considerIp\":false,";
+  json += "\"cellTowers\":[{";
+  json += "\"cellId\":"            + String(cidI) + ",";
+  json += "\"locationAreaCode\":"  + String(lacI) + ",";
+  json += "\"mobileCountryCode\":" + String(mccI) + ",";
+  json += "\"mobileNetworkCode\":" + String(mncI);
+  json += "}]}";
+
+  Serial.println("JSON: " + json);
+
+  WiFiClientSecure hc;
+  hc.setInsecure();
+  HTTPClient http;
+  http.begin(hc, "https://www.googleapis.com/geolocation/v1/geolocate?key="
+             + String(GOOGLE_API_KEY));
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.POST(json);
+  Serial.println("HTTP: " + String(code));
+
+  if (code != 200) {
+    Serial.println("Eroare Google: " + http.getString());
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  http.end();
+  Serial.println("Google OK: " + body);
+
+  DynamicJsonDocument doc(512);
+  if (deserializeJson(doc, body)) return false;
+  if (!doc.containsKey("location")) return false;
+
+  double lat = doc["location"]["lat"];
+  double lon = doc["location"]["lng"];
+  double acc = doc["accuracy"];
+
+  latOut  = String(lat, 6);
+  lonOut  = String(lon, 6);
+  precOut = String((int)acc);
+
+  return true;
+}
+
+/*
+void faApel() {
+  afisare("RETEA", "Verific GSM...", ST77XX_YELLOW);
+  asteaptaRetea(20);
+
+  afisare("APEL", "Suna...", ST77XX_RED);
+  trimiteAT("ATH", 1000);
+  delay(500);
+  trimiteAT("ATX4", 500);
+  delay(300);
+
+  for (int i = 1; i <= 2; i++) {
+    //buzzer sunet taste
+    for (int tasta = 0; tasta < 7; tasta++) {
+      digitalWrite(PIN_BUZZER, HIGH);
+      delay(70);
+      digitalWrite(PIN_BUZZER, LOW);
+      delay(90);
+    }
+    delay(300); 
+
+    
+    String r = trimiteAT("ATD" + numarUrgenta + ";", 5000);
+    Serial.println("Apel " + String(i) + ": " + r);
+    
+  
+    if (r.indexOf("NO CARRIER") == -1 && r.indexOf("ERROR") == -1 && r.indexOf("BUSY") == -1) {
+      afisare("APEL", "In curs...", ST77XX_RED);
+      
+      unsigned long startApel = millis();
+      bool apelIntrerupt = false;
+      
+      //Bucla rulează maximum 25 de secunde
+      while (millis() - startApel < 25000) {
+        
+        //Verificăm dacă s-a închis apelul
+        if (serialGSM.available()) {
+          String feedback = "";
+          while(serialGSM.available()) {
+            feedback += (char)serialGSM.read();
+          }
+          Serial.println("Feedback primit în timpul apelului: " + feedback);
+          
+          //Dacă persoana a respins apelul (NO CARRIER / BUSY)
+          if (feedback.indexOf("NO CARRIER") != -1 || feedback.indexOf("BUSY") != -1 || feedback.indexOf("NO ANSWER") != -1) {
+            apelIntrerupt = true;
+            break;
+          }
+        }
+
+        // Primul BEEP scurt pentru DTMF
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(300);
+        digitalWrite(PIN_BUZZER, LOW);
+        delay(150);
+        
+        // Al doilea BEEP scurt pentru DTMF
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(300);
+        digitalWrite(PIN_BUZZER, LOW);
+        
+        //Pauza mare dintre beep-uri 
+        for (int p = 0; p < 25; p++) {
+          if (millis() - startApel >= 25000) break;
+          
+          //Verificăm dacă vine semnal de respingere de la modem
+          if (serialGSM.available()) {
+            String feedbackPauza = "";
+            while(serialGSM.available()) {
+              feedbackPauza += (char)serialGSM.read();
+            }
+            if (feedbackPauza.indexOf("NO CARRIER") != -1 || feedbackPauza.indexOf("BUSY") != -1) {
+              apelIntrerupt = true;
+              break;
+            }
+          }
+          delay(100); 
+        }
+        
+        if (apelIntrerupt) break; 
+      }
+      
+      // Închidem apelul de tot și oprim buzzerul
+      digitalWrite(PIN_BUZZER, LOW); 
+      trimiteAT("ATH", 1000);
+      return;
+    }
+    
+    digitalWrite(PIN_BUZZER, LOW);
+    afisare("APEL", "Retry " + String(i) + "...", ST77XX_YELLOW);
+    delay(3000);
+  }
+  
+  afisare("APEL", "Esuat!", ST77XX_RED);
+  delay(1000);
+}
+*/
+bool apelActiv() {
+  String r = trimiteAT("AT+CLCC", 1000);
+  if (r.indexOf("+CLCC:") == -1) return false; // fara apel raportat = terminat
+  int idx = r.indexOf("+CLCC:") + 6;
+  String part = r.substring(idx);
+  part.trim();
+  int c1 = part.indexOf(',');
+  int c2 = part.indexOf(',', c1 + 1);
+  int c3 = part.indexOf(',', c2 + 1);
+  if (c1 == -1 || c2 == -1 || c3 == -1) return false;
+  String stat = part.substring(c2 + 1, c3);
+  stat.trim();
+  return (stat == "0"); // 0 = activ (raspuns)
+}
+
+void faApel() {
+  afisare("RETEA", "Verific GSM...", ST77XX_YELLOW);
+  asteaptaRetea(20);
+
+  afisare("APEL", "Suna...", ST77XX_RED);
+  trimiteAT("ATH", 1000);
+  delay(500);
+  trimiteAT("ATX4", 500);
+  delay(300);
+
+  for (int i = 1; i <= 2; i++) {
+    for (int tasta = 0; tasta < 7; tasta++) {
+      digitalWrite(PIN_BUZZER, HIGH);
+      delay(70);
+      digitalWrite(PIN_BUZZER, LOW);
+      delay(90);
+    }
+    delay(300);
+
+    String r = trimiteAT("ATD" + numarUrgenta + ";", 5000);
+    Serial.println("Apel " + String(i) + ": " + r);
+
+    if (r.indexOf("NO CARRIER") == -1 && r.indexOf("ERROR") == -1 && r.indexOf("BUSY") == -1) {
+      afisare("APEL", "In curs...", ST77XX_RED);
+
+      unsigned long startApel = millis();
+      unsigned long ultimaVerifCLCC = 0;
+      bool apelIntrerupt = false;
+      bool apelRaspuns = false;
+
+      while (millis() - startApel < 25000) {
+
+        //Verifica INTAI orice mesaj sosit direct pe serial
+        String feedback = "";
+        if (serialGSM.available()) {
+          while (serialGSM.available()) feedback += (char)serialGSM.read();
+          Serial.println("Feedback primit în timpul apelului: " + feedback);
+        }
+        if (feedback.indexOf("NO CARRIER") != -1 || feedback.indexOf("BUSY") != -1 || feedback.indexOf("NO ANSWER") != -1) {
+          apelIntrerupt = true;
+          break;
+        }
+
+        //Verifica starea prin CLCC (o data la ~1.5s), totul inline
+        if (millis() - ultimaVerifCLCC > 1500) {
+          ultimaVerifCLCC = millis();
+
+          String clcc = trimiteAT("AT+CLCC", 1500);
+
+          if (clcc.indexOf("NO CARRIER") != -1 || clcc.indexOf("BUSY") != -1 || clcc.indexOf("NO ANSWER") != -1) {
+            apelIntrerupt = true;
+            digitalWrite(PIN_BUZZER, LOW);
+            Serial.println("Apel TERMINAT (NO CARRIER in CLCC) - opresc buzzerul");
+            break;
+          }
+
+          if (clcc.indexOf("+CLCC:") != -1) {
+            //Exista apel raportat - verificam starea
+            int idx = clcc.indexOf("+CLCC:") + 6;
+            String part = clcc.substring(idx);
+            part.trim();
+            int c1 = part.indexOf(',');
+            int c2 = part.indexOf(',', c1 + 1);
+            int c3 = part.indexOf(',', c2 + 1);
+            if (c1 != -1 && c2 != -1 && c3 != -1) {
+              String stat = part.substring(c2 + 1, c3);
+              stat.trim();
+              if (stat == "0" && !apelRaspuns) {
+                apelRaspuns = true;
+                digitalWrite(PIN_BUZZER, LOW);
+                Serial.println("Apel RASPUNS - opresc buzzerul");
+              }
+            }
+          } else if (clcc.indexOf("OK") != -1) {
+            //Raspuns OK dar fara +CLCC: -> nu mai exista apel activ -> respins/inchis
+            apelIntrerupt = true;
+            digitalWrite(PIN_BUZZER, LOW);
+            Serial.println("Apel TERMINAT (fara +CLCC in raspuns) - opresc buzzerul");
+            break;
+          }
+          //Daca raspunsul e complet gol, nu facem nimic - incercam din nou la urmatoarea verificare
+        }
+
+        if (!apelRaspuns) {
+          digitalWrite(PIN_BUZZER, HIGH); delay(300); digitalWrite(PIN_BUZZER, LOW); delay(150);
+          digitalWrite(PIN_BUZZER, HIGH); delay(300); digitalWrite(PIN_BUZZER, LOW);
+
+          for (int p = 0; p < 25; p++) {
+            if (millis() - startApel >= 25000) break;
+
+            String feedbackPauza = "";
+            if (serialGSM.available()) {
+              while (serialGSM.available()) feedbackPauza += (char)serialGSM.read();
+            }
+            if (feedbackPauza.indexOf("NO CARRIER") != -1 || feedbackPauza.indexOf("BUSY") != -1) {
+              apelIntrerupt = true;
+              break;
+            }
+            delay(100);
+          }
+          if (apelIntrerupt) break;
+        } else {
+          delay(200);
+        }
+      }
+
+      digitalWrite(PIN_BUZZER, LOW);
+      trimiteAT("ATH", 1000);
+      return;
+    }
+
+    digitalWrite(PIN_BUZZER, LOW);
+    afisare("APEL", "Retry " + String(i) + "...", ST77XX_YELLOW);
+    delay(3000);
+  }
+
+  afisare("APEL", "Esuat!", ST77XX_RED);
+  delay(1000);
+}
+
+void trimiteAlerta() {
+  unsigned long t0 = millis(); // START total
+  Serial.println("T0 - Alerta declansata: " + String(t0) + "ms");
+
+  afisare("SOS", "ACTIVAT!", ST77XX_RED);
+  delay(500);
+
+  //LOCALIZARE GSM
+  unsigned long tGSM_start = millis();
+  Serial.println("T1 - Inceput localizare GSM: " + String(tGSM_start - t0) + "ms de la start");
+
+  String mcc="", mnc="", lac="", cid="", semnal="";
+  bool gsmOK = citesteGSM(mcc, mnc, lac, cid, semnal);
+
+  unsigned long tGSM_end = millis();
+  Serial.println("T2 - Sfarsit localizare GSM: " + String(tGSM_end - t0) + "ms de la start");
+  Serial.println("Durata localizare GSM: " + String(tGSM_end - tGSM_start) + "ms");
+
+  //GOOGLE API
+  unsigned long tGoogle_start = millis();
+  Serial.println("T3 - Inceput Google API: " + String(tGoogle_start - t0) + "ms de la start");
+
+  String lat="", lon="", prec="";
+  bool coordOK = false;
+  if (gsmOK) {
+    coordOK = geolocalizeaza(mcc, mnc, lac, cid, lat, lon, prec);
+  }
+
+  unsigned long tGoogle_end = millis();
+  Serial.println("T4 - Sfarsit Google API: " + String(tGoogle_end - t0) + "ms de la start");
+  Serial.println("Durata Google API: " + String(tGoogle_end - tGoogle_start) + "ms");
+
+  String timestamp = getTimestamp();
+  String mesaj = " *ALERTA SOS*:" + sursaAlerta;
+  mesaj += "*Data si Ora:* " + timestamp + "\n\n";
+
+  if (coordOK) {
+    mesaj += " *LOCATIE:*\n";
+    mesaj += "• Lat: `" + lat + "`\n";
+    mesaj += "• Lon: `" + lon + "`\n";
+    mesaj += "• Precizie: ~" + prec + " metri\n\n";
+    mesaj += " *GOOGLE MAPS:*\n";
+    mesaj += "https://www.google.com/maps?q=" + lat + "," + lon + "\n\n";
+  } else {
+    mesaj += " _Locatie indisponibila_\n\n";
+  }
+
+  mesaj += "*DATE TURN GSM:*\n";
+  if (gsmOK) {
+    mesaj += "• MCC: `" + mcc + "` MNC: `" + mnc + "`\n";
+    mesaj += "• LAC: `" + lac + "`\n";
+    mesaj += "• Cell ID: `" + cid + "`\n";
+    mesaj += "• Semnal: `" + semnal + "dBm`";
+  } else {
+    mesaj += "• Date turn indisponibile";
+  }
+
+  //TELEGRAM
+  unsigned long tTelegram_start = millis();
+  Serial.println("T5 - Inceput trimitere Telegram: " + String(tTelegram_start - t0) + "ms de la start");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    afisare("TELEGRAM", "Trimit...", ST77XX_BLUE);
+    bool ok = bot.sendMessage(CHAT_ID, mesaj, "Markdown");
+    afisare("TELEGRAM", ok ? "Trimis!" : "Eroare!",
+            ok ? ST77XX_GREEN : ST77XX_RED);
+    delay(1000);
+  }
+
+  unsigned long tTelegram_end = millis();
+  Serial.println("T6 - Sfarsit Telegram: " + String(tTelegram_end - t0) + "ms de la start");
+  Serial.println("Durata Telegram: " + String(tTelegram_end - tTelegram_start) + "ms");
+
+  //APEL GSM
+  unsigned long tApel_start = millis();
+  Serial.println("T7 - Inceput apel GSM: " + String(tApel_start - t0) + "ms de la start");
+
+  faApel();
+
+  unsigned long tApel_end = millis();
+  Serial.println("T8 - Sfarsit apel GSM: " + String(tApel_end - t0) + "ms de la start");
+  Serial.println("Durata apel: " + String(tApel_end - tApel_start) + "ms");
+
+  //TOTAL
+  unsigned long tTotal = millis() - t0;
+  Serial.println("TOTAL end-to-end: " + String(tTotal) + "ms (" + String(tTotal/1000) + " secunde)");
+  
+
+  buzzerConfirmare();
+
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(10, 20); tft.setTextColor(ST77XX_GREEN); tft.setTextSize(2); tft.println("SISTEM ACTIV");
+  tft.drawFastHLine(0, 50, 240, ST77XX_GREEN);
+  tft.setCursor(10, 65); tft.setTextColor(ST77XX_CYAN); tft.println("WiFi: OK");
+  tft.setCursor(10, 100); tft.setTextColor(ST77XX_CYAN); tft.println(infoRetea);
+  tft.drawFastHLine(0, 175, 240, ST77XX_YELLOW);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(10, 190); tft.println("Ridica receptorul");
+  tft.setCursor(10, 220); tft.println("SAU spune vocal:");
+  tft.setCursor(10, 250); tft.setTextColor(ST77XX_CYAN); tft.println("\"AJUTOR!\"");
+  tft.fillCircle(220, 300, 8, 0xF81F);
+  //tft.fillCircle(220, 300, 8, ST77XX_GREEN);
+}
+
+
+
+void setup() {
+  pinMode(MODEM_POWER_ON, OUTPUT);
+  digitalWrite(MODEM_POWER_ON, HIGH);
+
+  Wire.begin(21, 22);
+  Wire.beginTransmission(0x75);
+  Wire.write(0x00); Wire.write(0x37);
+  Wire.endTransmission();
+
+  Serial.begin(115200);
+  serialGSM.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+//pinMode(PIN_BUTON, INPUT_PULLDOWN);
+  pinMode(PIN_BUTON, INPUT_PULLUP);
+  pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(MODEM_PWKEY, OUTPUT);
+  pinMode(PIN_VOCAL_DEDICAT, INPUT_PULLDOWN);
+
+  tft.init(240, 320);
+  tft.setRotation(2);
+  afisare("SISTEM", "Pornire...", ST77XX_CYAN);
+
+  digitalWrite(MODEM_PWKEY, HIGH);
+  delay(1200);
+  digitalWrite(MODEM_PWKEY, LOW);
+  delay(15000);
+
+  String r = trimiteAT("AT", 3000);
+  bool ok = (r.indexOf("OK") != -1 || r.indexOf("AT") != -1);
+  delay(1000);
+
+  afisare("WiFi", "Conectare...", ST77XX_CYAN);
+  WiFi.begin(ssid, password);
+  clientSecure.setInsecure();
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t < 30) {
+    delay(500); t++;
+  }
+  
+  bool wOK = (WiFi.status() == WL_CONNECTED);
+  afisare("WiFi", wOK ? "Conectat!" : "Eroare!", wOK ? ST77XX_GREEN : ST77XX_RED);
+  delay(1000);
+
+  //Activează NTP dacă WiFi e disponibil
+  if (wOK) { 
+    initNTP(); 
+    delay(500); 
+  }
+
+  //Detectează operatorul la pornire
+  String tmcc="", tmnc="", tlac="", tcid="", tsemnal="";
+  citesteGSM(tmcc, tmnc, tlac, tcid, tsemnal);
+
+  tft.fillScreen(ST77XX_BLACK);
+  
+  //Titlu Status
+  tft.setCursor(10, 20);
+  tft.setTextColor(ST77XX_GREEN);
+  tft.setTextSize(2);
+  tft.println("SISTEM ACTIV");
+
+  tft.drawFastHLine(0, 50, 240, ST77XX_GREEN);
+
+  //Status Rețele
+  tft.setCursor(10, 65);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.println(wOK ? "WiFi: OK" : "WiFi: EROARE");
+  
+  tft.setCursor(10, 100);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.println(infoRetea);
+  tft.drawFastHLine(0, 175, 240, ST77XX_YELLOW);
+
+  //Instrucțiuni utilizator (Mecanic + Vocal)
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextSize(2);
+  
+  tft.setCursor(10, 190);
+  tft.println("Ridica receptorul");
+  
+  tft.setCursor(10, 220);
+  tft.println("SAU spune vocal:");
+  
+  tft.setCursor(10, 250);
+  tft.setTextColor(ST77XX_CYAN); 
+  tft.println("\"AJUTOR!\"");
+
+  timpUltimaVocal = millis();
+  timpUltimaApasare = millis();
+
+  tft.fillCircle(220, 300, 8, 0xF81F);
+}
+void loop() {
+
+  unsigned long acum = millis();
+ 
+  bool receptorRidicat = (digitalRead(PIN_BUTON) == HIGH); // HIGH = declanșare
+
+  int starePinVocal = digitalRead(PIN_VOCAL_DEDICAT);
+ 
+  // --- DEBUG: afișează starea pinilor la fiecare secundă ---
+
+  static unsigned long ultimulDebug = 0;
+
+  if (acum - ultimulDebug > 1000) {
+
+    ultimulDebug = acum;
+
+    Serial.print("[DEBUG] PIN_BUTON=");
+
+    Serial.print(digitalRead(PIN_BUTON));
+
+    Serial.print(" (receptorRidicat=");
+
+    Serial.print(receptorRidicat);
+
+    Serial.print(") | PIN_VOCAL_DEDICAT=");
+
+    Serial.println(starePinVocal);
+
+  }
+ 
+  if (serialGSM.available()) {
+
+    Serial.write(serialGSM.read());
+
+  }
+ 
+  // ==========================================
+
+  // TRIGGER 1: Furca Mecanică
+
+  // ==========================================
+
+  if (receptorRidicat && (acum - timpUltimaApasare > 4000)) {
+
+    timpUltimaApasare = acum;
+ 
+    Serial.println("[TRIGGER] >>> FURCA MECANICA a declansat alerta! PIN_BUTON era HIGH.");
+
+    sursaAlerta = "\n\nFurca mecanică\n\n";
+ 
+    digitalWrite(PIN_BUZZER, HIGH);
+
+    delay(3000);
+
+    digitalWrite(PIN_BUZZER, LOW);
+ 
+    afisare("SOS", "ACTIVAT!", ST77XX_CYAN);
+
+    trimiteAlerta();
+
+  }
+ 
+  // ==========================================
+
+  // TRIGGER 2: Comanda Vocală
+
+  // ==========================================
+
+  if (digitalRead(PIN_VOCAL_DEDICAT) == HIGH) {
+
+    delay(50);
+ 
+    if (digitalRead(PIN_VOCAL_DEDICAT) == HIGH && (acum - timpUltimaVocal > 5000)) {
+
+      timpUltimaVocal = acum;
+ 
+      Serial.println("[TRIGGER] >>> COMANDA VOCALA a declansat alerta! PIN_VOCAL_DEDICAT era HIGH.");
+
+      sursaAlerta = "\n\nComanda vocala\n\n";
+ 
+      digitalWrite(PIN_BUZZER, HIGH);
+
+      delay(3000);
+
+      digitalWrite(PIN_BUZZER, LOW);
+ 
+      afisare("SOS", "ACTIVAT!", ST77XX_RED);
+
+      trimiteAlerta();
+
+    }
+
+  }
+
+}
+ 
